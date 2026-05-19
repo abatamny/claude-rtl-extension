@@ -4,36 +4,39 @@
  * Strategy:
  *   1. Apply dir="auto" to the chat editor so direction shifts naturally as the
  *      user types Arabic/Hebrew vs. Latin characters.
- *   2. For each message paragraph, count the ratio of RTL code points to total
- *      letter code points. If >= RTL_THRESHOLD, set dir="rtl". Otherwise use
- *      dir="auto" and let the browser's Unicode Bidi Algorithm (UBA) decide.
+ *   2. For each message paragraph AND list item, count the ratio of RTL code
+ *      points to total letter code points. If >= RTL_THRESHOLD, set dir="rtl".
+ *      Otherwise use dir="auto" and let the browser's UBA decide.
  *   3. A MutationObserver watches ONLY for new nodes (new messages), not for
  *      character data changes. Typing is handled exclusively by the input listener.
  *   4. All DOM writes are wrapped in withObserverPaused() to prevent our own
  *      setAttribute/style calls from re-triggering the observer (infinite loop).
- *   5. Mixed content (English words, numbers, math) inside RTL paragraphs is
+ *   5. Mixed content (English words, numbers, math) inside RTL elements is
  *      handled automatically by the UBA — no extra logic required.
  *   6. Code blocks always stay LTR (enforced via styles.css).
  *
- * ── What was crashing the page ──────────────────────────────────────────────
+ * ── Bug history ─────────────────────────────────────────────────────────────
  *
- *  BUG 1 — Infinite observer loop (the main crash):
- *    The old observer used `characterData: true` on document.body. Every
- *    keystroke fired the observer → stampBlock() called setAttribute/style →
- *    those DOM writes fired the observer again → infinite loop → page freeze.
- *    FIX: Remove characterData from observer options entirely. The input
- *    listener handles typing; the observer only needs structural changes.
+ *  v1 BUG — Infinite observer loop (page freeze):
+ *    Used `characterData: true` on document.body. Every keystroke fired the
+ *    observer → stampBlock() called setAttribute → that DOM write fired the
+ *    observer again → infinite loop.
+ *    FIX: Removed characterData. Added withObserverPaused() around all writes.
  *
- *  BUG 2 — Double-trigger on every keystroke:
- *    Both the input listener AND the observer called processEditors() on each
- *    key, creating two overlapping feedback paths.
- *    FIX: Observer reacts only to addedNodes. Input listener owns editor updates.
+ *  v2 BUG 1 — List items not detected:
+ *    SEL.blocks only contained `p` selectors. <li> elements in numbered/bulleted
+ *    lists were never processed, so Arabic/Hebrew list items rendered LTR.
+ *    FIX: Added `li` variants to SEL.blocks and to stampEditor's querySelectorAll.
  *
- *  BUG 3 — Unconditional DOM writes amplifying mutations:
- *    stampBlock() wrote setAttribute and style.setProperty even when direction
- *    hadn't changed, generating extra mutations for the observer to react to.
- *    FIX: Cache each element's last-seen text; skip when nothing changed.
- *    Guard attribute writes with getAttribute('dir') !== newDir before writing.
+ *  v2 BUG 2 — Flickering during streaming:
+ *    During streaming, Claude appends new nodes every ~100ms. Each batch fires
+ *    the observer, which re-evaluates direction on partial text. The RTL ratio
+ *    oscillates around the threshold as text accumulates, causing LTR<->RTL flips.
+ *    FIX 1: Longer debounce (STREAMING_DEBOUNCE_MS) when streaming is active,
+ *            so evaluation waits until a meaningful chunk has accumulated.
+ *    FIX 2: RTL lock — once an element inside an active stream is stamped RTL,
+ *            it stays RTL until streaming ends. Direction can only move LTR->RTL
+ *            during a stream, never RTL->LTR.
  */
 
 (function () {
@@ -51,8 +54,13 @@
     // Debounce for the input-event listener (typing direction updates).
     inputDebounceMs: 150,
 
-    // Debounce for the MutationObserver callback (new message nodes).
+    // Debounce for the observer when NO streaming is active (normal message arrival).
     observerDebounceMs: 250,
+
+    // Longer debounce used while Claude is actively streaming a response.
+    // Gives text time to accumulate before direction is evaluated, preventing
+    // LTR<->RTL flickering on partial sentences.
+    streamingDebounceMs: 600,
 
     // Debounce for SPA navigation re-scan.
     navDebounceMs: 600,
@@ -72,7 +80,7 @@
   //  U+FB50-U+FDFF  Arabic Presentation Forms-A
   //  U+FE70-U+FEFF  Arabic Presentation Forms-B
 
-  const RTL_RE    = /[֐-׿؀-ۿݐ-ݿࢠ-ࣿ‏‫יִ-ﭏﭐ-﷿ﹰ-﻿]/g;
+  const RTL_RE    = /[֐-׿؀-ۿݐ-ݿࢠ-ࣿ‏‫יִ-ﭏﭐ-﷿ﹰ-﻿]/g;
   const LETTER_RE = /\p{L}/gu;
 
   // ─── State ──────────────────────────────────────────────────────────────────
@@ -81,8 +89,8 @@
   let domObserver = null;
 
   // Cache: element -> last textContent string we processed.
-  // Lets stampBlock skip the regex when text hasn't changed,
-  // AND correctly re-processes after disable/re-enable (see el.hasAttribute guard).
+  // Lets stampBlock skip the regex when text is unchanged AND dir is already set.
+  // The el.hasAttribute('dir') guard in stampBlock ensures disable/re-enable works.
   const cache = new WeakMap();
 
   // ─── Utilities ──────────────────────────────────────────────────────────────
@@ -102,20 +110,29 @@
     return (rtl ? rtl.length : 0) / letters.length;
   }
 
+  // ─── Streaming detection ─────────────────────────────────────────────────────
+  //
+  // Claude.ai marks the element that is currently being streamed with
+  // data-is-streaming. We use this to apply the RTL lock and longer debounce.
+
+  function isStreamingActive() {
+    return !!document.querySelector('[data-is-streaming]');
+  }
+
+  function isInsideStream(el) {
+    return !!el.closest('[data-is-streaming]');
+  }
+
   // ─── Observer pause / resume ─────────────────────────────────────────────────
   //
   // Every DOM write (setAttribute, style.setProperty) MUST be wrapped here.
   // Without disconnecting first, our own writes trigger the observer callback,
-  // which writes again, which triggers again — the infinite loop that froze the page.
+  // which writes again — the infinite loop that froze the page in v1.
 
   const OBSERVER_OPTS = {
-    childList: true,   // watch for new message/paragraph nodes being inserted
+    childList: true,  // watch for new message/paragraph/li nodes being inserted
     subtree:   true,
-    // *** characterData is intentionally omitted ***
-    // With characterData: true, every keystroke fires the observer because
-    // ProseMirror updates text nodes on each character. That callback then
-    // calls setAttribute which fires the observer again. Removing this option
-    // is the single most important fix. The input listener covers typing.
+    // characterData intentionally omitted — see v1 bug note above.
   };
 
   function withObserverPaused(fn) {
@@ -132,28 +149,37 @@
   // ─── Core stamping ──────────────────────────────────────────────────────────
 
   /**
-   * Apply the correct dir attribute to a block-level element.
+   * Apply the correct dir attribute to a block-level element (p or li).
    *
-   * Skip conditions (prevent unnecessary DOM writes):
+   * Skip conditions:
    *  1. Text too short to classify.
-   *  2. Text unchanged since last stamp AND dir attribute already present
-   *     (common case: observer fires on a node we already handled).
-   *  3. The dir value we'd write matches what's already there.
+   *  2. Text unchanged since last stamp AND dir attribute already present.
+   *  3. RTL LOCK: element is inside an active stream and is already dir="rtl" —
+   *     don't flip it back to LTR/auto on partial text. Direction moves
+   *     LTR->RTL during streaming only, never RTL->LTR.
+   *  4. The dir value we'd write already matches what's there (no-op write guard).
    */
   function stampBlock(el) {
     const text = (el.textContent || '').trim();
     if (text.length < CONFIG.minTextLength) return;
 
-    // Fast path: text hasn't changed and we already set a dir — skip entirely.
-    // el.hasAttribute('dir') guard ensures re-enable after disable works correctly.
+    // Fast path: nothing changed.
     if (cache.get(el) === text && el.hasAttribute('dir')) return;
     cache.set(el, text);
 
     const newDir = rtlRatio(text) >= CONFIG.rtlThreshold ? 'rtl' : 'auto';
+    const currentDir = el.getAttribute('dir');
 
-    // Only write setAttribute if the value would actually change.
-    // Each setAttribute call is itself a DOM mutation; guard it to stay quiet.
-    if (el.getAttribute('dir') !== newDir) {
+    // RTL lock: while this element is inside an active stream, once it has been
+    // set RTL we never flip it back. Eliminates LTR<->RTL flickering on partial
+    // sentences. The lock naturally lifts when streaming ends and the element is
+    // no longer inside [data-is-streaming].
+    if (currentDir === 'rtl' && newDir !== 'rtl' && isInsideStream(el)) {
+      return;
+    }
+
+    // Guard the write — each setAttribute is itself a DOM mutation.
+    if (currentDir !== newDir) {
       el.setAttribute('dir', newDir);
     }
 
@@ -166,7 +192,9 @@
   /**
    * The ProseMirror editor always gets dir="auto" so layout and caret direction
    * flip automatically as the user switches between scripts.
-   * Its child <p> elements are stamped individually for per-paragraph direction.
+   * Its child <p> AND <li> elements are stamped individually.
+   *
+   * BUG 1 FIX: added 'li' so list items typed by the user get correct direction.
    */
   function stampEditor(editor) {
     if (!editor) return;
@@ -174,10 +202,14 @@
       editor.setAttribute('dir', 'auto');
     }
     editor.style.setProperty('unicode-bidi', 'plaintext', 'important');
-    editor.querySelectorAll('p').forEach(stampBlock);
+    editor.querySelectorAll('p, li').forEach(stampBlock);
   }
 
   // ─── Selectors ──────────────────────────────────────────────────────────────
+  //
+  // BUG 1 FIX: added `li` variants alongside every `p` variant so that numbered
+  // and bulleted list items in Claude's responses are stamped individually.
+  // Each <li> is checked for its own dominant language, not just the parent <ol>/<ul>.
 
   const SEL = {
     editors: [
@@ -186,36 +218,40 @@
     ].join(', '),
 
     blocks: [
+      // Claude response paragraphs and list items
       '.font-claude-message p',
+      '.font-claude-message li',
       '.prose p',
+      '.prose li',
+      // Streaming response paragraphs and list items
       '[data-is-streaming] p',
+      '[data-is-streaming] li',
+      // User message paragraphs and list items
       '.font-user-message p',
+      '.font-user-message li',
       '.font-user-message',
+      // Broad fallback
       'main p',
+      'main li',
     ].join(', '),
   };
 
   // ─── Processing passes ───────────────────────────────────────────────────────
 
-  // Called by the INPUT listener only (typing path).
-  // Does not touch message blocks — only the active editor.
+  // Called by the INPUT listener only (typing path — editor only).
   function processEditors() {
     document.querySelectorAll(SEL.editors).forEach(stampEditor);
   }
 
-  // Called by the OBSERVER and on init/navigation (new content path).
+  // Called by the observer and on init/navigation (new content path).
   function processBlocks() {
-    document.querySelectorAll(SEL.blocks).forEach(el => {
+    document.querySelectorAll(SEL.blocks).forEach(function (el) {
       if (el.closest('pre, code, .code-block, [class*="code"]')) return;
       stampBlock(el);
     });
   }
 
   // ─── Input listener — typing path ───────────────────────────────────────────
-  //
-  // This is the ONLY path that runs while the user is typing.
-  // The MutationObserver is NOT involved in handling keystrokes.
-  // That separation is what prevents the feedback loop.
 
   const onInput = debounce(function () {
     if (!enabled) return;
@@ -228,28 +264,40 @@
     }
   }, true); // capture phase: runs before React's synthetic event handlers
 
-  // ─── MutationObserver — new message path ────────────────────────────────────
+  // ─── MutationObserver — new message / streaming path ────────────────────────
   //
-  // Fires only when new nodes are added (new message, streaming update, React
-  // mount). Does NOT fire on character data changes — that's the input listener's job.
+  // BUG 2 FIX: two debounced handlers at different delays.
+  //   onNewNodesNormal   — used when nothing is streaming (fast, 250ms)
+  //   onNewNodesStreaming — used while Claude is streaming (slow, 600ms)
+  //
+  // The slower debounce lets text accumulate before direction is evaluated,
+  // so the ratio is stable by the time stampBlock runs. Combined with the
+  // RTL lock in stampBlock, flickering is eliminated.
 
-  const onNewNodes = debounce(function () {
+  function runProcessing() {
     if (!enabled) return;
     withObserverPaused(function () {
       processEditors();
       processBlocks();
     });
-  }, CONFIG.observerDebounceMs);
+  }
+
+  const onNewNodesNormal    = debounce(runProcessing, CONFIG.observerDebounceMs);
+  const onNewNodesStreaming  = debounce(runProcessing, CONFIG.streamingDebounceMs);
 
   function startObserver() {
     if (domObserver) domObserver.disconnect();
 
     domObserver = new MutationObserver(function (mutations) {
       if (!enabled) return;
-      // Only act on structural changes. Text edits are the input listener's job.
       var hasNewNodes = mutations.some(function (m) { return m.addedNodes.length > 0; });
-      if (hasNewNodes) {
-        onNewNodes();
+      if (!hasNewNodes) return;
+
+      // Route to the appropriate debounce based on whether streaming is active.
+      if (isStreamingActive()) {
+        onNewNodesStreaming();
+      } else {
+        onNewNodesNormal();
       }
     });
 
@@ -264,10 +312,6 @@
   }
 
   // ─── SPA navigation ─────────────────────────────────────────────────────────
-  //
-  // Intercept history.pushState instead of running a second MutationObserver on
-  // `document` — that second observer also fired on every keystroke and made
-  // things worse.
 
   const onNavigate = debounce(function () {
     if (!enabled) return;
@@ -297,12 +341,10 @@
       startObserver();
     } else {
       stopObserver();
-      // Strip every dir/style we applied so Claude.ai reverts to its defaults.
       document.querySelectorAll('[dir="rtl"], [dir="auto"]').forEach(function (el) {
         el.removeAttribute('dir');
         el.style.removeProperty('unicode-bidi');
         el.style.removeProperty('text-align');
-        // Remove from cache so re-enable re-processes the element from scratch.
         cache.delete(el);
       });
     }
@@ -321,13 +363,13 @@
         sendResponse({ ok: true });
         break;
     }
-    return true; // keep channel open for async sendResponse
+    return true;
   });
 
   // ─── Init ────────────────────────────────────────────────────────────────────
 
   chrome.storage.local.get(CONFIG.storageKey, function (result) {
-    var shouldEnable = result[CONFIG.storageKey] !== false; // default: true
+    var shouldEnable = result[CONFIG.storageKey] !== false;
     enabled = shouldEnable;
     if (shouldEnable) {
       withObserverPaused(function () {

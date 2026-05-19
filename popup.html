@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Claude RTL Fix</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      width: 260px;
+      padding: 18px 16px 14px;
+      background: #ffffff;
+      color: #111827;
+    }
+
+    /* ── Header ── */
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .logo {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #7c3aed 0%, #5b21b6 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-size: 16px;
+      flex-shrink: 0;
+      user-select: none;
+    }
+    .header-text h1 {
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+    .header-text p {
+      font-size: 11px;
+      color: #6b7280;
+      margin-top: 1px;
+    }
+
+    /* ── Toggle row ── */
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 0;
+      border-top: 1px solid #f3f4f6;
+    }
+    .row-label {
+      font-size: 13px;
+      font-weight: 500;
+    }
+
+    /* ── Toggle switch ── */
+    .toggle {
+      position: relative;
+      display: inline-block;
+      width: 42px;
+      height: 24px;
+      flex-shrink: 0;
+    }
+    .toggle input { opacity: 0; width: 0; height: 0; position: absolute; }
+    .knob {
+      position: absolute;
+      inset: 0;
+      background: #d1d5db;
+      border-radius: 999px;
+      cursor: pointer;
+      transition: background 0.18s ease;
+    }
+    .knob::before {
+      content: '';
+      position: absolute;
+      width: 18px;
+      height: 18px;
+      left: 3px;
+      top: 3px;
+      background: #fff;
+      border-radius: 50%;
+      transition: transform 0.18s ease;
+      box-shadow: 0 1px 3px rgba(0,0,0,.25);
+    }
+    .toggle input:checked + .knob { background: #7c3aed; }
+    .toggle input:checked + .knob::before { transform: translateX(18px); }
+
+    /* ── Status chip ── */
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      font-weight: 500;
+      padding: 3px 8px;
+      border-radius: 999px;
+      margin-top: 10px;
+      transition: background 0.2s, color 0.2s;
+    }
+    .chip.on  { background: #f3e8ff; color: #7c3aed; }
+    .chip.off { background: #f3f4f6; color: #6b7280; }
+    .dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+    }
+    .chip.on  .dot { background: #7c3aed; }
+    .chip.off .dot { background: #9ca3af; }
+
+    /* ── Footer ── */
+    .footer {
+      margin-top: 12px;
+      font-size: 10px;
+      color: #9ca3af;
+      text-align: center;
+      border-top: 1px solid #f3f4f6;
+      padding-top: 10px;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <div class="logo">ع</div>
+    <div class="header-text">
+      <h1>Claude RTL Fix</h1>
+      <p>Arabic &amp; Hebrew support</p>
+    </div>
+  </div>
+
+  <div class="row">
+    <span class="row-label">Enable on Claude.ai</span>
+    <label class="toggle">
+      <input type="checkbox" id="toggle" />
+      <span class="knob"></span>
+    </label>
+  </div>
+
+  <div id="chip" class="chip on">
+    <span class="dot"></span>
+    <span id="chipText">Active — RTL detection running</span>
+  </div>
+
+  <div class="footer">
+    Detects Arabic · Hebrew · mixed bidi text
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,85 @@
+/*
+ * Claude.ai RTL Fix — Stylesheet
+ *
+ * These CSS rules act as a safety net alongside the JavaScript detection.
+ * They handle edge cases and ensure code/math blocks are never flipped RTL.
+ */
+
+/* ── RTL block baseline ─────────────────────────────────────────────────────── */
+
+[dir="rtl"] {
+  text-align: right;
+}
+
+/* ── Always keep code blocks LTR ────────────────────────────────────────────── */
+/*
+ * Code is always LTR, regardless of the surrounding paragraph direction.
+ * `unicode-bidi: embed` creates a new bidi embedding level that isolates the
+ * code from the parent RTL context.
+ */
+
+[dir="rtl"] pre,
+[dir="rtl"] code,
+[dir="rtl"] .code-block,
+[dir="rtl"] [class*="code"],
+[dir="rtl"] [class*="Code"],
+pre,
+code {
+  direction: ltr !important;
+  text-align: left !important;
+  unicode-bidi: embed !important;
+}
+
+/* ── Math / formula blocks ──────────────────────────────────────────────────── */
+/*
+ * KaTeX and similar renderers produce LTR markup; protect them from RTL inheritance.
+ */
+
+[dir="rtl"] .katex,
+[dir="rtl"] .math,
+[dir="rtl"] [class*="math"],
+[dir="rtl"] [class*="Math"] {
+  direction: ltr !important;
+  unicode-bidi: embed !important;
+}
+
+/* ── Inline code inside RTL paragraphs ──────────────────────────────────────── */
+/*
+ * Inline `<code>` tags inside an RTL paragraph should still read left-to-right.
+ * `unicode-bidi: isolate` keeps the inline element's bidi context self-contained.
+ */
+
+[dir="rtl"] code {
+  unicode-bidi: isolate !important;
+}
+
+/* ── Mixed inline text ──────────────────────────────────────────────────────── */
+/*
+ * The browser's UBA already handles most mixed content.
+ * `unicode-bidi: plaintext` on block containers (set via JS) makes the UBA
+ * evaluate direction per paragraph instead of inheriting from the parent.
+ * No extra CSS rules are needed for inline English / numbers / punctuation
+ * inside Arabic or Hebrew paragraphs.
+ */
+
+/* ── Input / editor ─────────────────────────────────────────────────────────── */
+/*
+ * Placeholder text should respect the computed direction of the input.
+ */
+
+[contenteditable][dir="rtl"]::before,
+[contenteditable][dir="auto"]::before {
+  text-align: inherit;
+}
+
+/* ── Lists inside RTL paragraphs ────────────────────────────────────────────── */
+
+[dir="rtl"] ul,
+[dir="rtl"] ol {
+  padding-inline-start: 0;
+  padding-inline-end: 1.5em;
+}
+
+[dir="rtl"] li {
+  text-align: right;
+}

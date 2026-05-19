@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Claude.ai RTL Fix",
+  "short_name": "RTL Fix",
+  "version": "1.0.0",
+  "description": "Automatically fixes Right-to-Left text direction for Arabic and Hebrew users on Claude.ai. Handles mixed bidirectional content correctly.",
+
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": ["https://claude.ai/*"],
+
+  "content_scripts": [
+    {
+      "matches": ["https://claude.ai/*"],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Claude.ai RTL Fix",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  }
+}
